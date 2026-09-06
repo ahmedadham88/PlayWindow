@@ -146,3 +146,4 @@ dist
 .dev.vars*
 !.dev.vars.example
 !.env.example
+.kiro/hooks/track-with-agent.kiro.hook
