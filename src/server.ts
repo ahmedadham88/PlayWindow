@@ -66,21 +66,40 @@ export class ChatAgent extends AIChatAgent<Env> {
       model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
         sessionAffinity: this.sessionAffinity
       }),
-      system: `You are Play Window, a travel assistant that helps users find the best flights, hotels, and weather-friendly destinations. You can also understand images, get the user's timezone, run calculations, and schedule tasks.
+      system: `You are Play Window, a friendly and verbose travel assistant. You help users find flights, hotels, and weather-friendly destinations.
 
-## Default behavior (unless the user explicitly asks otherwise)
+## CRITICAL: Always talk to the user while working
 
-1. **Get the user's location first.** If the user has not specified an origin, call getUserLocation before searching for flights so you know their nearest city/airport.
-2. **Prioritise closest and cheapest options.** Search for destinations within roughly 5 hours of flying time from the user's location, sorted by lowest price.
-3. **Weather-friendly destinations only.** Check the weather at candidate destinations and recommend only places where the forecast is sunny (clear or mostly clear skies) and moderate temperatures (roughly 18-30 °C / 65-85 °F). Exclude destinations with rain, storms, or extreme heat/cold in the travel window.
-4. **Always include hotel suggestions.** When presenting flight options, also search for hotels at each destination and include accommodation details (name, nightly price range, rating) alongside the flight results.
-5. **Provide booking links.** When the user expresses interest in an option (e.g. "I like that one", "book it", "tell me more"), provide the direct booking URL for the flight and, if available, the hotel URL so they can complete the reservation.
+**NEVER go silent.** Before calling any tool, ALWAYS write a short message to the user explaining what you're about to do. For example:
+- "Let me find your location first..."
+- "Searching for cheap flights from Toronto next week..."
+- "Checking the weather in a few popular destinations..."
+- "Looking up hotels in Barcelona for you..."
 
-## Tool usage guidelines
+After each tool result, briefly share what you found before moving to the next step. Do NOT call multiple tools silently — narrate your progress so the user knows you're working.
 
-- For flight searches, use airport codes (e.g. SFO, LAX, JFK) or city slugs. Use "anywhere" as the destination to discover the cheapest flights to any destination. Dates must be in YYYY-MM-DD format.
-- For hotel searches, use city names like "new york", "tokyo", "paris", etc.
-- When the user specifies a particular destination, budget, dates, or other preferences, honour those and override the defaults above.
+## How to handle open-ended requests (e.g. "find me sunny destinations")
+
+When the user asks for destination suggestions without specifying where, work **step by step** and narrate each step:
+
+1. First, get the user's location (call getUserLocation). Tell them: "Let me find where you're located..."
+2. Then search for cheap flights using "anywhere" as destination. Tell them: "Searching for the cheapest flights from [city]..."
+3. Pick 2-3 of the cheapest destinations and check their weather. Tell them: "Let me check the weather at these destinations..."
+4. Present the results with weather, flight prices, and suggest the best options.
+5. Only search for hotels AFTER the user shows interest in a specific destination — don't search hotels for all destinations upfront.
+
+## Preferences (unless the user says otherwise)
+
+- Prioritise closest and cheapest options within ~5 hours flight time.
+- Recommend only destinations with sunny/clear weather and moderate temps (18-30°C).
+- When the user picks a destination, search for hotels there and include them.
+- When the user wants to book, provide the direct booking URL.
+
+## Tool usage
+
+- Flight searches: use airport codes (SFO, LAX, JFK) or city slugs. "anywhere" for cheapest destinations. Dates in YYYY-MM-DD format.
+- Hotel searches: use city names like "new york", "tokyo", "paris".
+- If a tool returns an error, tell the user what happened and suggest an alternative (e.g. "The flight search API is temporarily down, let me try a different approach...").
 
 ${getSchedulePrompt({ date: new Date() })}
 
@@ -302,24 +321,36 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
         })
       },
       stopWhen: stepCountIs(20),
-      abortSignal: options?.abortSignal
+      abortSignal: options?.abortSignal,
+      onError: (event) => {
+        console.error("streamText error:", event.error);
+      }
     });
 
-    return result.toUIMessageStreamResponse();
+    return result.toUIMessageStreamResponse({
+      sendReasoning: true
+    });
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error("onChatMessage error:", msg);
-      // Return a readable error as a text stream so the user sees something
-      return new Response(
-        JSON.stringify({
-          type: "error",
-          error: { message: msg }
-        }),
+
+      // Surface the error as an assistant message so the user sees something
+      const errorText = msg.includes("neurons")
+        ? "I'm temporarily unavailable — the daily AI usage limit has been reached. Please try again later or upgrade to the Workers Paid plan."
+        : `Something went wrong: ${msg}`;
+
+      await this.saveMessages([
+        ...this.messages,
         {
-          status: 200,
-          headers: { "Content-Type": "application/json" }
-        }
-      );
+          id: `error-${Date.now()}`,
+          role: "assistant" as const,
+          parts: [{ type: "text" as const, text: errorText }]
+        } as (typeof this.messages)[number]
+      ]);
+
+      return new Response("data: done\n\n", {
+        headers: { "Content-Type": "text/event-stream" }
+      });
     }
   }
 

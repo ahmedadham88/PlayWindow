@@ -150,3 +150,4 @@ dist
 .kiro/
 .attribution/
 .playwright-mcp/
+.kiro/hooks/track-with-agent.kiro.hook
