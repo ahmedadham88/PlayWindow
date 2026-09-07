@@ -2,7 +2,7 @@
 
 Your AI travel agent for finding the best flights, accommodation, and weather-friendly destinations — all from a single chat interface.
 
-**Live:** [cf-playwindow.ahmed-adham88.workers.dev](https://cf-playwindow.ahmed-adham88.workers.dev/)
+**Live:** [playwindow.ahmed-adham88.workers.dev](https://playwindow.ahmed-adham88.workers.dev/)
 
 Built on Cloudflare Workers with the [Agents SDK](https://developers.cloudflare.com/agents/), powered by Workers AI.
 
