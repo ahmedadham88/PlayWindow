@@ -41,7 +41,12 @@
 	"observability": {
 		"enabled": true
 	},
-	"upload_source_maps": true
+	"upload_source_maps": true,
+	"vars": {
+		"SERPAPI_KEY": "",
+		"LITEAPI_KEY": "sand_ab343353-171c-40fe-bb5c-219941bb04ac",
+		"STAYINGAPI_TOKEN": ""
+	}
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement

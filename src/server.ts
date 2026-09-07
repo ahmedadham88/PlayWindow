@@ -10,6 +10,12 @@ import {
   tool
 } from "ai";
 import { z } from "zod";
+import {
+  executeGetWeather,
+  executeGetFlights,
+  executeGetHotels,
+  type ApiCredentials
+} from "./tools";
 
 export class ChatAgent extends AIChatAgent<Env> {
   maxPersistedMessages = 100;
@@ -47,14 +53,34 @@ export class ChatAgent extends AIChatAgent<Env> {
   }
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
+    try {
+    const creds: ApiCredentials = {
+      serpApiKey: this.env.SERPAPI_KEY || undefined,
+      liteApiKey: this.env.LITEAPI_KEY || undefined,
+      stayingApiToken: this.env.STAYINGAPI_TOKEN || undefined
+    };
     const mcpTools = this.mcp.getAITools();
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
         sessionAffinity: this.sessionAffinity
       }),
-      system: `You are a helpful assistant that can understand images. You can check the weather, get the user's timezone, run calculations, and schedule tasks. When users share images, describe what you see and answer questions about them.
+      system: `You are Play Window, a travel assistant that helps users find the best flights, hotels, and weather-friendly destinations. You can also understand images, get the user's timezone, run calculations, and schedule tasks.
+
+## Default behavior (unless the user explicitly asks otherwise)
+
+1. **Get the user's location first.** If the user has not specified an origin, call getUserLocation before searching for flights so you know their nearest city/airport.
+2. **Prioritise closest and cheapest options.** Search for destinations within roughly 5 hours of flying time from the user's location, sorted by lowest price.
+3. **Weather-friendly destinations only.** Check the weather at candidate destinations and recommend only places where the forecast is sunny (clear or mostly clear skies) and moderate temperatures (roughly 18-30 °C / 65-85 °F). Exclude destinations with rain, storms, or extreme heat/cold in the travel window.
+4. **Always include hotel suggestions.** When presenting flight options, also search for hotels at each destination and include accommodation details (name, nightly price range, rating) alongside the flight results.
+5. **Provide booking links.** When the user expresses interest in an option (e.g. "I like that one", "book it", "tell me more"), provide the direct booking URL for the flight and, if available, the hotel URL so they can complete the reservation.
+
+## Tool usage guidelines
+
+- For flight searches, use airport codes (e.g. SFO, LAX, JFK) or city slugs. Use "anywhere" as the destination to discover the cheapest flights to any destination. Dates must be in YYYY-MM-DD format.
+- For hotel searches, use city names like "new york", "tokyo", "paris", etc.
+- When the user specifies a particular destination, budget, dates, or other preferences, honour those and override the defaults above.
 
 ${getSchedulePrompt({ date: new Date() })}
 
@@ -71,25 +97,121 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
 
         // Server-side tool: runs automatically on the server
         getWeather: tool({
-          description: "Get the current weather for a city",
+          description:
+            "Get the current weather and forecast for a city. Returns current conditions plus a 7-day daily forecast. Powered by Open-Meteo (free, no API key).",
           inputSchema: z.object({
-            city: z.string().describe("City name")
+            city: z.string().describe("City name (e.g. 'Paris', 'Tokyo', 'New York')")
           }),
-          execute: async ({ city }) => {
-            // Replace with a real weather API in production
-            const conditions = ["sunny", "cloudy", "rainy", "snowy"];
-            const temp = Math.floor(Math.random() * 30) + 5;
-            return {
-              city,
-              temperature: temp,
-              condition:
-                conditions[Math.floor(Math.random() * conditions.length)],
-              unit: "celsius"
-            };
+          execute: async (args) => {
+            try { return await executeGetWeather(args); }
+            catch (e) { return { error: `Weather lookup failed: ${e instanceof Error ? e.message : String(e)}` }; }
           }
         }),
 
-        // Client-side tool: no execute function — the browser handles it
+        // Flight search via Kiwi/Skypicker GraphQL API (no API key required)
+        getFlights: tool({
+          description:
+            "Search for flights between airports. Returns prices, times, airlines, stops, and booking links. Use airport codes (SFO, LAX, JFK) or 'anywhere' as destination to find cheapest flights to any destination.",
+          inputSchema: z.object({
+            origin: z
+              .string()
+              .describe("Origin airport code (e.g. 'SFO', 'JFK', 'LHR')"),
+            destination: z
+              .string()
+              .default("anywhere")
+              .describe(
+                "Destination airport code or 'anywhere' for cheapest destinations"
+              ),
+            departureDate: z
+              .string()
+              .describe("Departure date in YYYY-MM-DD format"),
+            returnDate: z
+              .string()
+              .optional()
+              .describe(
+                "Return date in YYYY-MM-DD format (omit for one-way)"
+              ),
+            maxStops: z
+              .number()
+              .int()
+              .min(0)
+              .max(3)
+              .default(2)
+              .describe("Maximum number of stops (0 = direct only)"),
+            cabinClass: z
+              .enum(["ECONOMY", "PREMIUM_ECONOMY", "BUSINESS", "FIRST"])
+              .default("ECONOMY")
+              .describe("Cabin class"),
+            adults: z
+              .number()
+              .int()
+              .min(1)
+              .max(9)
+              .default(1)
+              .describe("Number of adult passengers"),
+            maxPrice: z
+              .number()
+              .optional()
+              .describe("Maximum price in USD"),
+            limit: z
+              .number()
+              .int()
+              .min(1)
+              .max(20)
+              .default(5)
+              .describe("Number of results to return")
+          }),
+          execute: async (args) => {
+            try { return await executeGetFlights(args, creds); }
+            catch (e) { return { error: `Flight search failed: ${e instanceof Error ? e.message : String(e)}` }; }
+          }
+        }),
+
+        // Hotel search via Xotelo API (TripAdvisor data, no API key required)
+        getHotels: tool({
+          description:
+            "Search for hotels in a city. Returns hotel names, ratings, price ranges, and types. Supports 60+ major cities worldwide including New York, Tokyo, Paris, London, etc.",
+          inputSchema: z.object({
+            city: z
+              .string()
+              .describe(
+                "City name (e.g. 'new york', 'tokyo', 'paris', 'london')"
+              ),
+            limit: z
+              .number()
+              .int()
+              .min(1)
+              .max(30)
+              .default(10)
+              .describe("Number of results to return"),
+            minPrice: z
+              .number()
+              .optional()
+              .describe("Minimum nightly price in USD"),
+            maxPrice: z
+              .number()
+              .optional()
+              .describe("Maximum nightly price in USD"),
+            minRating: z
+              .number()
+              .min(0)
+              .max(5)
+              .optional()
+              .describe("Minimum rating (0-5)")
+          }),
+          execute: async (args) => {
+            try { return await executeGetHotels(args, creds); }
+            catch (e) { return { error: `Hotel search failed: ${e instanceof Error ? e.message : String(e)}` }; }
+          }
+        }),
+
+        // Client-side tools: no execute function — the browser handles them
+        getUserLocation: tool({
+          description:
+            "Get the user's current location (city, country, coordinates) from their browser. Use this to determine the user's origin city/airport for flight searches when they don't specify one.",
+          inputSchema: z.object({})
+        }),
+
         getUserTimezone: tool({
           description:
             "Get the user's timezone from their browser. Use this when you need to know the user's local time.",
@@ -184,6 +306,21 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
     });
 
     return result.toUIMessageStreamResponse();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error("onChatMessage error:", msg);
+      // Return a readable error as a text stream so the user sees something
+      return new Response(
+        JSON.stringify({
+          type: "error",
+          error: { message: msg }
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        }
+      );
+    }
   }
 
   async executeTask(description: string, _task: Schedule<string>) {

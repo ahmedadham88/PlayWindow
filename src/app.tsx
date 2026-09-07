@@ -362,6 +362,83 @@ function Chat() {
     agent,
     experimental_throttle: 100,
     onToolCall: async ({ toolCall, addToolOutput }) => {
+      if (toolCall.toolName === "getUserLocation") {
+        const output = await (async () => {
+          // Try browser Geolocation API first
+          try {
+            const pos = await new Promise<GeolocationPosition>(
+              (resolve, reject) =>
+                navigator.geolocation.getCurrentPosition(resolve, reject, {
+                  timeout: 5000,
+                  maximumAge: 300000
+                })
+            );
+            const { latitude, longitude } = pos.coords;
+
+            // Reverse-geocode coordinates to city name
+            const nomRes = await fetch(
+              `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json&zoom=10`
+            );
+            if (nomRes.ok) {
+              const nom = (await nomRes.json()) as {
+                address?: {
+                  city?: string;
+                  town?: string;
+                  state?: string;
+                  country?: string;
+                  country_code?: string;
+                };
+              };
+              const addr = nom.address ?? {};
+              return {
+                city: addr.city || addr.town || addr.state || "Unknown",
+                country: addr.country || "Unknown",
+                countryCode: addr.country_code?.toUpperCase() || "",
+                latitude,
+                longitude,
+                source: "browser-geolocation"
+              };
+            }
+
+            return { latitude, longitude, source: "browser-geolocation" };
+          } catch {
+            // Fallback to IP-based geolocation (no permission needed)
+          }
+
+          try {
+            const ipRes = await fetch("https://ipapi.co/json/");
+            if (ipRes.ok) {
+              const ip = (await ipRes.json()) as {
+                city?: string;
+                region?: string;
+                country_name?: string;
+                country_code?: string;
+                latitude?: number;
+                longitude?: number;
+              };
+              return {
+                city: ip.city || "Unknown",
+                region: ip.region || "",
+                country: ip.country_name || "Unknown",
+                countryCode: ip.country_code || "",
+                latitude: ip.latitude,
+                longitude: ip.longitude,
+                source: "ip-geolocation"
+              };
+            }
+          } catch {
+            // Both methods failed
+          }
+
+          return {
+            error: "Could not determine location",
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+          };
+        })();
+
+        addToolOutput({ toolCallId: toolCall.toolCallId, output });
+      }
+
       if (toolCall.toolName === "getUserTimezone") {
         addToolOutput({
           toolCallId: toolCall.toolCallId,
@@ -488,11 +565,11 @@ function Chat() {
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h1 className="text-lg font-semibold text-kumo-default">
-              <span className="mr-2">⛅</span>Agent Starter
+              <span className="mr-2">✈️</span>Play Window
             </h1>
             <Badge variant="secondary">
               <ChatCircleDotsIcon size={12} weight="bold" className="mr-1" />
-              AI Chat
+              Flights, Hotels & Weather
             </Badge>
           </div>
           <div className="flex items-center gap-3">
@@ -700,30 +777,37 @@ function Chat() {
           {messages.length === 0 && (
             <Empty
               icon={<ChatCircleDotsIcon size={32} />}
-              title="Start a conversation"
+              title="Welcome to Play Window"
               contents={
-                <div className="flex flex-wrap justify-center gap-2">
-                  {[
-                    "What's the weather in Paris?",
-                    "What timezone am I in?",
-                    "Calculate 5000 * 3",
-                    "Remind me in 5 minutes to take a break"
-                  ].map((prompt) => (
-                    <Button
-                      key={prompt}
-                      variant="outline"
-                      size="sm"
-                      disabled={isStreaming}
-                      onClick={() => {
-                        sendMessage({
-                          role: "user",
-                          parts: [{ type: "text", text: prompt }]
-                        });
-                      }}
-                    >
-                      {prompt}
-                    </Button>
-                  ))}
+                <div className="flex flex-col items-center gap-4">
+                  <span className="text-sm text-kumo-subtle text-center max-w-md">
+                    Your agent for finding the best flights and accommodation for
+                    weather-friendly destinations. Have a place in mind, or want me
+                    to find the best budget-friendly spots with great weather next week?
+                  </span>
+                  <div className="flex flex-wrap justify-center gap-2">
+                    {[
+                      "Find me sunny destinations with cheap flights next week",
+                      "What's the weather like in Barcelona?",
+                      "Search flights from SFO to Tokyo",
+                      "Find hotels in Paris under $200/night"
+                    ].map((prompt) => (
+                      <Button
+                        key={prompt}
+                        variant="outline"
+                        size="sm"
+                        disabled={isStreaming}
+                        onClick={() => {
+                          sendMessage({
+                            role: "user",
+                            parts: [{ type: "text", text: prompt }]
+                          });
+                        }}
+                      >
+                        {prompt}
+                      </Button>
+                    ))}
+                  </div>
                 </div>
               }
             />
