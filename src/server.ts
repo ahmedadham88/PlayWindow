@@ -59,6 +59,18 @@ export class ChatAgent extends AIChatAgent<Env> {
       liteApiKey: this.env.LITEAPI_KEY || undefined,
       stayingApiToken: this.env.STAYINGAPI_TOKEN || undefined
     };
+    // Pre-check: test the AI binding with a tiny request to catch quota errors early
+    try {
+      await this.env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 1
+      });
+    } catch (preCheckError) {
+      const msg = preCheckError instanceof Error ? preCheckError.message : String(preCheckError);
+      console.error("AI pre-check failed:", msg);
+      return this.createErrorResponse(msg);
+    }
+
     const mcpTools = this.mcp.getAITools();
     const workersai = createWorkersAI({ binding: this.env.AI });
 
@@ -321,37 +333,48 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
         })
       },
       stopWhen: stepCountIs(20),
-      abortSignal: options?.abortSignal,
-      onError: (event) => {
-        console.error("streamText error:", event.error);
-      }
+      abortSignal: options?.abortSignal
     });
 
-    return result.toUIMessageStreamResponse({
-      sendReasoning: true
-    });
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      console.error("onChatMessage error:", msg);
-
-      // Surface the error as an assistant message so the user sees something
-      const errorText = msg.includes("neurons")
-        ? "I'm temporarily unavailable — the daily AI usage limit has been reached. Please try again later or upgrade to the Workers Paid plan."
-        : `Something went wrong: ${msg}`;
-
-      await this.saveMessages([
-        ...this.messages,
-        {
-          id: `error-${Date.now()}`,
-          role: "assistant" as const,
-          parts: [{ type: "text" as const, text: errorText }]
-        } as (typeof this.messages)[number]
-      ]);
-
-      return new Response("data: done\n\n", {
-        headers: { "Content-Type": "text/event-stream" }
+    // Consume the stream to detect errors before returning
+    // If the first chunk fails (e.g. quota exceeded), we catch it here
+    try {
+      // Force the stream to start so errors surface immediately
+      const response = result.toUIMessageStreamResponse({
+        sendReasoning: true
       });
+      return response;
+    } catch (streamError) {
+      const errMsg = streamError instanceof Error ? streamError.message : String(streamError);
+      console.error("Stream error:", errMsg);
+      return this.createErrorResponse(errMsg);
     }
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error("onChatMessage error:", errMsg);
+      return this.createErrorResponse(errMsg);
+    }
+  }
+
+  private async createErrorResponse(errMsg: string) {
+    const errorText = errMsg.includes("neurons") || errMsg.includes("4006")
+      ? "I'm temporarily unavailable — the daily Cloudflare AI usage quota has been reached. Please try again later or upgrade to the Workers Paid plan."
+      : errMsg.includes("not available on the Workers Free plan")
+        ? "This AI model requires a Workers Paid plan. Please upgrade at https://dash.cloudflare.com"
+        : `Something went wrong: ${errMsg}`;
+
+    await this.saveMessages([
+      ...this.messages,
+      {
+        id: `error-${Date.now()}`,
+        role: "assistant" as const,
+        parts: [{ type: "text" as const, text: errorText }]
+      } as (typeof this.messages)[number]
+    ]);
+
+    return new Response("data: done\n\n", {
+      headers: { "Content-Type": "text/event-stream" }
+    });
   }
 
   async executeTask(description: string, _task: Schedule<string>) {
